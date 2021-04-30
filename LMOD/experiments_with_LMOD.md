@@ -326,3 +326,147 @@ case will react differently due to the strange way in which ``family`` works in 
     executes the version of ``level_two.lua`` that was loaded when ``famexp_c``
     was loaded.
 
+
+## Playing around with HierarchyA in a software stack for a heterogeneous cluster
+
+Assume that we have a cluster with various partitions on which we want to offer multiple
+versions of a software stack (think various editions of the EasyBuild common toolchains
+or similarly editions of the EESSI stack).
+
+A good way to offer this software stack to users is through a two-level hierarchy,
+and there are two options:
+
+ 1. Use the partition of the cluster as the first level, and the software stack as the
+    second level. The system can then preload the partition module for the hardware
+    on which the user logs on in ``.bashrc`` or so (though one would need to think
+    about the consequences this would have when starting a job through Slurm as then
+    the environment is inherited).
+
+ 2. Use the software stack as the first level and the partition as the second level.
+    This is a nicer fit if there are also software stacks for which there are no worries
+    with the different partition, e.g., the EESSI stack which has its own built-in
+    mechanism to select the right binaries which would be in the software stack module
+    itself if there would be a module, or a module just offering the bare system as
+    delivered by the vendor, e.g., on a HPE-Cray system with the Cray Programming
+    Environment.
+
+For this example, we will go with the second setup,as it can be used to demonstrate
+the ideosyncracies of the LMOD ``hierarchyA`` function for introspection.
+
+Such a setup is useful for multiple reasons
+
+ 1. ``module spider`` can now tell you wich versions of which packages are available
+    in which partitions of the cluster as when you do a level 2 ``module spider`` command
+    (one specifying the full name and version of the package) it will tell you which
+    combinations of software stack and partition modules you need to load to be able
+    to load the module.
+
+ 2. If the partitions correspond to partitions in the cluster job system (rather than
+    processor architectures as our example suggest)
+
+
+### Setup of the hierarchy
+
+Our setup is as follows. The choice of names doesn't entirely follow the typical
+LMOD conventions, but our names make it clearer which type of modules are stored where.
+
+ 1. ``$MODULEROOT/SoftwareStack``: Contains the software stack modules
+
+ 2. ``$MODULEROOT/SystemPartition/EBcommon/2020b`` etc.: Contain the modules for the partitions,
+    in this case the partitions for which the ``EBcommon/2020b`` software stack is available.
+
+ 3. ``$MODULEROOT/Applications/EBcommon/2020b/partition/SKL`` and similar: software for the
+    software stack and partition indicated by the directory, in this case the ``EBcommon/2020b``
+    for the ``partition/SKL`` partition of the cluster.
+
+The third level may have a different structure, e.g., if a partition would correspond
+to a cluster in a federated entity consisting of multiple clusters and multiple clusters
+would have the same OS and processor and hence be able to share the software stack.
+This would limit the use of introspection functions at level 3 and possible levels
+beyond though as it is as if you start a new hierarchy at that level.
+
+To experiment with this example, make sure that ``MODULEROOT`` points to the
+``ClusterSoftware`` subdirectory of this repository and set ``MODULEPATH`` to
+``$MODULEROOT/SoftwareStack``.
+
+### LMOD introspection functions
+
+As it is dangerous to pass information between levels of the hierarchy through environment
+variables as we have seen in the previous section of this text, in particular if those
+variables are used to compute directories that will be added to PATH-type variables
+using ``preepend_path``or ``append_path``, we have to use the place of the module in the
+hierarchy to derive its function.
+
+For this purpose, and to be able to write generic module files that can then be linked
+to from the various locations where they are used rather than having to use a preprocessor
+to create the module files from templates, LMOD offers a number of introspection functions
+[documented on the "LUA Modulefile Functions" page of the manual](https://lmod.readthedocs.io/en/latest/050_lua_modulefiles.html).
+
+  * ``myModuleName()``: Returns the name of the current modulefile  without the version.
+
+  * ``myModuleVersion()``: Returns the version of the current modulefile without the
+    name.
+
+  * ``myModuleFullName()``: Returns the name and version of the current module file as
+    it would be used with ``module load``, so without the ``.lua`` extension if it
+    is a LUA module file.
+
+  * ``myFileName()``: Returns the absolute file name and path of the current modulefile.
+
+  * ``hierarchyA (“fullName”, level)``: Returns the hierarchy of the current module.
+    This is a tricky function to use though as (a) it doesn't seem to work when
+    ``"fullname"`` is not the full name of the module calling the function (so the
+    name as retuned by ``myModuleFullName()``) but (b) its interpretation of how the
+    hierarchy is build depends on the format of the full name of the module. If the
+    full module name is just of the type "name" without version, it assumes each level
+    in the hierarchy corresponds to one level of subdirectories, while if the full
+    module name is of the type "name/version" it will assume that each level in the
+    hierarchy corresponds to two levels of subdirectories as is the case in our test
+    hierarchy.
+
+    ``hierarchyA`` is really a parser for the information returned by ``myFileName()``.
+
+  * ``myModuleUsrName()``: Returns the name the user specified to load the module.
+    It could be the name or the name and version, but also an alias.
+
+Besides those introspection functions that give information about the module file that
+is being executed, there are also introspection functions that give information about
+the shell type but they don't matter in our discussion.
+
+### The arguments of hierarchyA
+
+The Lmod manual is not very clear about how ``hierarchyA`` works. According to the
+manual it is called as ``hierarchyA (“fullName”, level)``. Our experience shows:
+
+  * The "fullName" should be the correct full name of the module calling the function
+    which frankly is strange that you need to add it as the module knows its name.
+
+  * ``level`` is the number of levels in the hierarchy that should be returned. For
+    this the function walks backwards in the path of the module, starting from just
+    before the module name.
+
+  * One level of the hierarchy can consist out of one or two level in the directory
+    hierarchy. The way that Lmod determines whether it is one or two is strange at best:
+    If the module name is of the form "name/version.lua", is assumes that in the directory
+    hierarchy each level also consists of two elements (name and version), and if the
+    module is just of the form "name.lua", is assumes each level in the hierarchy is
+    also just a single level in the directory hierarchy. So if you mix both styles
+    of modules you may have some manual parsing to do in the return values of
+    ``hierachyA`` or use your own strategy for parsing the output of ``myFileName()``
+    instead.
+
+    E.g., in ``SystemPartition/EBcommon/2021a/Milan.lua``, a call to
+    ``hierarchyA( myModuleFullName(), 1 )`` will only return
+    ``{'2021a'}`` and a call to ``hierarchyA( myModuleFullName(), 2 )`` will
+    return ``{'2021a`, `EBcommon`}`` while in
+    ``SystemPartition/EBcommon/2021a/partition/Milan.lua``, a call to
+    ``hierarchyA( myModuleFullName(), 1 )`` will return ``{'EBcommon/2021a'}``.
+
+## Advanced hierarchy example: ClusterSoftwareAdv.
+
+TODO: Show that the example works differently if SKL is loaded than when partition/SKL
+is loaded if we change EXAMPLE_PARTITION to Milan and do a module reload.
+
+
+
+
